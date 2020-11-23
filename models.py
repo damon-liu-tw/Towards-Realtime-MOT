@@ -136,7 +136,7 @@ class YOLOLayer(nn.Module):
 
         
 
-    def forward(self, p_cat,  img_size, targets=None, classifier=None, test_emb=False):
+    def forward(self, p_cat,  img_size, targets=None, classifier=None, test_emb=False, onnx_export=False):
         p, p_emb = p_cat[:, :24, ...], p_cat[:, 24:, ...]
         nB, nGh, nGw = p.shape[0], p.shape[-2], p.shape[-1]
 
@@ -204,10 +204,11 @@ class YOLOLayer(nn.Module):
             p_emb = F.normalize(p_emb.unsqueeze(1).repeat(1,self.nA,1,1,1).contiguous(), dim=-1)
             #p_emb_up = F.normalize(shift_tensor_vertically(p_emb, -self.shift[self.layer]), dim=-1)
             #p_emb_down = F.normalize(shift_tensor_vertically(p_emb, self.shift[self.layer]), dim=-1)
-            p_cls = torch.zeros(nB,self.nA,nGh,nGw,1).cuda()               # Temp
+            p_cls = torch.zeros(nB,self.nA,nGh,nGw,1)
+            if not onnx_export: p_cls = p_cls.cuda()
             p = torch.cat([p_box, p_conf, p_cls, p_emb], dim=-1)
             #p = torch.cat([p_box, p_conf, p_cls, p_emb, p_emb_up, p_emb_down], dim=-1)
-            p[..., :4] = decode_delta_map(p[..., :4], self.anchor_vec.to(p))
+            p[..., :4] = decode_delta_map(p[..., :4], self.anchor_vec.to(p), onnx_export)
             p[..., :4] *= self.stride
 
             return p.view(nB, -1, p.shape[-1])
@@ -216,7 +217,7 @@ class YOLOLayer(nn.Module):
 class Darknet(nn.Module):
     """YOLOv3 object detection model"""
 
-    def __init__(self, cfg_dict, nID=0, test_emb=False):
+    def __init__(self, cfg_dict, nID=0, test_emb=False, onnx_export=False):
         super(Darknet, self).__init__()
         if isinstance(cfg_dict, str):
             cfg_dict = parse_model_cfg(cfg_dict)
@@ -230,6 +231,7 @@ class Darknet(nn.Module):
         for ln in self.loss_names:
             self.losses[ln] = 0
         self.test_emb = test_emb
+        self.onnx_export = onnx_export
         
         self.classifier = nn.Linear(self.emb_dim, nID) if nID>0 else None
 
@@ -268,7 +270,7 @@ class Darknet(nn.Module):
                         targets = [targets[i][:int(l)] for i,l in enumerate(targets_len)]
                     x = module[0](x, self.img_size, targets, self.classifier, self.test_emb)
                 else:  # get detections
-                    x = module[0](x, self.img_size)
+                    x = module[0](x, self.img_size, onnx_export=self.onnx_export)
                 output.append(x)
             layer_outputs.append(x)
 
@@ -279,6 +281,49 @@ class Darknet(nn.Module):
         elif self.test_emb:
             return torch.cat(output, 0)
         return torch.cat(output, 1)
+    
+    def fuse(self):
+        # Fuse Conv2d + BatchNorm2d layers throughout model
+        print('Fusing layers...')
+        fused_list = nn.ModuleList()
+        for a in list(self.children())[0]:
+            if isinstance(a, nn.Sequential):
+                for i, b in enumerate(a):
+                    if isinstance(b, nn.modules.batchnorm.BatchNorm2d):
+                        # fuse this bn layer with the previous conv2d layer
+                        conv = a[i - 1]
+                        fused = fuse_conv_and_bn(conv, b)
+                        a = nn.Sequential(fused, *list(a.children())[i + 1:])
+                        break
+            fused_list.append(a)
+        self.module_list = fused_list
+
+
+def fuse_conv_and_bn(conv, bn):
+    # https://tehnokv.com/posts/fusing-batchnorm-and-conv/
+    with torch.no_grad():
+        # init
+        fusedconv = torch.nn.Conv2d(conv.in_channels,
+                                    conv.out_channels,
+                                    kernel_size=conv.kernel_size,
+                                    stride=conv.stride,
+                                    padding=conv.padding,
+                                    bias=True)
+
+        # prepare filters
+        w_conv = conv.weight.clone().view(conv.out_channels, -1)
+        w_bn = torch.diag(bn.weight.div(torch.sqrt(bn.eps + bn.running_var)))
+        fusedconv.weight.copy_(torch.mm(w_bn, w_conv).view(fusedconv.weight.size()))
+
+        # prepare spatial bias
+        if conv.bias is not None:
+            b_conv = conv.bias
+        else:
+            b_conv = torch.zeros(conv.weight.size(0))
+        b_bn = bn.bias - bn.weight.mul(bn.running_mean).div(torch.sqrt(bn.running_var + bn.eps))
+        fusedconv.bias.copy_(torch.mm(w_bn, b_conv.reshape(-1, 1)).reshape(-1) + b_bn)
+
+        return fusedconv
 
 def shift_tensor_vertically(t, delta):
     # t should be a 5-D tensor (nB, nA, nH, nW, nC)

@@ -370,10 +370,11 @@ def build_targets_thres(target, anchor_wh, nA, nC, nGh, nGw):
             tbox[b][fg_index] = delta_target
     return tconf, tbox, tid
 
-def generate_anchor(nGh, nGw, anchor_wh):
+def generate_anchor(nGh, nGw, anchor_wh, onnx_export=False):
     nA = len(anchor_wh)
     yy, xx =torch.meshgrid(torch.arange(nGh), torch.arange(nGw))
-    xx, yy = xx.cuda(), yy.cuda()
+    if not onnx_export:
+        xx, yy = xx.cuda(), yy.cuda()
 
     mesh = torch.stack([xx, yy], dim=0)                                              # Shape 2, nGh, nGw
     mesh = mesh.unsqueeze(0).repeat(nA,1,1,1).float()                                # Shape nA x 2 x nGh x nGw
@@ -402,13 +403,13 @@ def decode_delta(delta, fg_anchor_list):
     gh = ph * torch.exp(dh)
     return torch.stack([gx, gy, gw, gh], dim=1)
 
-def decode_delta_map(delta_map, anchors):
+def decode_delta_map(delta_map, anchors, onnx_export=False):
     '''
     :param: delta_map, shape (nB, nA, nGh, nGw, 4)
     :param: anchors, shape (nA,4)
     '''
     nB, nA, nGh, nGw, _ = delta_map.shape
-    anchor_mesh = generate_anchor(nGh, nGw, anchors) 
+    anchor_mesh = generate_anchor(nGh, nGw, anchors, onnx_export) 
     anchor_mesh = anchor_mesh.permute(0,2,3,1).contiguous()              # Shpae (nA x nGh x nGw) x 4
     anchor_mesh = anchor_mesh.unsqueeze(0).repeat(nB,1,1,1,1)
     pred_list = decode_delta(delta_map.view(-1,4), anchor_mesh.view(-1,4))

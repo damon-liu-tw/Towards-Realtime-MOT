@@ -56,7 +56,7 @@ def track(opt):
     frame_dir = None if opt.output_format=='text' else osp.join(result_root, 'frame')
     try:
         eval_seq(opt, dataloader, 'mot', result_filename,
-                 save_dir=frame_dir, show_image=False, frame_rate=frame_rate)
+                 save_dir=frame_dir, show_image=True, frame_rate=frame_rate)
     except Exception as e:
         logger.info(e)
 
@@ -68,8 +68,8 @@ def track(opt):
         
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(prog='demo.py')
-    parser.add_argument('--cfg', type=str, default='cfg/yolov3_1088x608.cfg', help='cfg file path')
-    parser.add_argument('--weights', type=str, default='weights/latest.pt', help='path to weights file')
+    parser.add_argument('--cfg', type=str, default='cfg/yolov3_576x320.cfg', help='cfg file path')
+    parser.add_argument('--weights', type=str, default='weights/jde_576x320_uncertainty.pt', help='path to weights file')
     parser.add_argument('--iou-thres', type=float, default=0.5, help='iou threshold required to qualify as detected')
     parser.add_argument('--conf-thres', type=float, default=0.5, help='object confidence threshold')
     parser.add_argument('--nms-thres', type=float, default=0.4, help='iou threshold for non-maximum suppression')
@@ -81,5 +81,16 @@ if __name__ == '__main__':
     opt = parser.parse_args()
     print(opt, end='\n\n')
 
-    track(opt)
+    # track(opt)
 
+    from tracker.multitracker import JDETracker
+    tracker = JDETracker(opt, onnx_export=True)
+    device = torch.device('cpu')
+    model = tracker.model
+    model.fuse()
+    img = torch.zeros([1,3,320,576]).to(device)
+    torch.onnx.export(model, img,
+                      '/media/alpha/liebe/git_public/Towards-Realtime-MOT/weights/jde_576x320.onnx',
+                      opset_version=9,
+                      input_names=['images'], output_names=['output'])
+    

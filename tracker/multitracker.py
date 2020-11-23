@@ -158,12 +158,13 @@ class STrack(BaseTrack):
 
 
 class JDETracker(object):
-    def __init__(self, opt, frame_rate=30):
+    def __init__(self, opt, frame_rate=30, onnx_export=False):
         self.opt = opt
-        self.model = Darknet(opt.cfg, nID=14455)
+        self.model = Darknet(opt.cfg, nID=14455, onnx_export=onnx_export)
         # load_darknet_weights(self.model, opt.weights)
         self.model.load_state_dict(torch.load(opt.weights, map_location='cpu')['model'], strict=False)
-        self.model.cuda().eval()
+        if not onnx_export: self.model.cuda()
+        self.model.eval()
 
         self.tracked_stracks = []  # type: list[STrack]
         self.lost_stracks = []  # type: list[STrack]
